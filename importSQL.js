@@ -18,7 +18,7 @@ const sequelize = new Sequelize(process.env.DATABASE_URL, {
 
 async function importSQL() {
     try {
-        const sql = fs.readFileSync("hf-3.sql", "utf8"); // your SQL file
+        const sql = fs.readFileSync("hf-4.sql", "utf8"); // your SQL file
         await sequelize.query(sql);                       // execute SQL
         console.log("✅ SQL imported successfully!");
         process.exit(0);
