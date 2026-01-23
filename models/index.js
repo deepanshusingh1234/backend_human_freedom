@@ -2,6 +2,10 @@ import { Country } from "./Country.js";
 import { Year } from "./Year.js";
 import { CountryYearIndexData } from "./CountryYearIndexData.js";
 import { VisaMatrix } from "./VisaMatrix.js";
+import { BlogUser } from "./BlogUser.js";
+import { BlogPost } from "./BlogPost.js";
+import { PostStat } from "./PostStat.js";
+import { PostList } from "./PostList.js";
 
 // Country ↔ CountryYearIndexData associations
 Country.hasMany(CountryYearIndexData, {
@@ -56,4 +60,32 @@ VisaMatrix.belongsTo(Country, {
     targetKey: "id"
 });
 
-export { Country, Year, CountryYearIndexData, VisaMatrix };
+// Blog Associations
+BlogPost.hasMany(PostStat, {
+    foreignKey: "post_id",
+    as: "stats"
+});
+
+PostStat.belongsTo(BlogPost, {
+    foreignKey: "post_id"
+});
+
+BlogPost.hasMany(PostList, {
+    foreignKey: "post_id",
+    as: "list"
+});
+
+PostList.belongsTo(BlogPost, {
+    foreignKey: "post_id"
+});
+
+export {
+    Country,
+    Year,
+    CountryYearIndexData,
+    VisaMatrix,
+    BlogUser,
+    BlogPost,
+    PostStat,
+    PostList
+};

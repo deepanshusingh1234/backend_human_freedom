@@ -2,6 +2,9 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import sequelize from "./db.js";
+import Contact from './models/Contact.js';
+import { BlogUser, BlogPost, PostStat, PostList } from "./models/index.js";
+import { Year } from "./models/Year.js";
 
 dotenv.config();
 
@@ -23,6 +26,737 @@ const formatPopulationIndex = (population, worldPopulation) => {
     if (!worldPopulation || !population || worldPopulation === 0) return "";
     return ((population / worldPopulation) * 100).toFixed(2) + " %";
 };
+
+
+
+// Helper function to create slug
+const createSlug = (title) => {
+    return title
+        .toLowerCase()
+        .replace(/[^\w\s-]/g, "")
+        .replace(/\s+/g, "-")
+        .replace(/--+/g, "-")
+        .trim();
+};
+
+// ====================================================
+// BLOG API ENDPOINTS
+// ====================================================
+
+// Admin login endpoint (Plain text)
+app.post("/api/blog/admin/login", async (req, res) => {
+    try {
+        const { username, password } = req.body;
+
+        console.log("🔐 Admin login attempt:", username, "Password:", password);
+
+        if (!username || !password) {
+            return res.status(400).json({
+                error: "Username and password are required"
+            });
+        }
+
+        // Find user
+        const user = await BlogUser.findOne({
+            where: { username }
+        });
+
+        if (!user) {
+            console.log("❌ User not found:", username);
+            return res.status(401).json({
+                error: "Invalid credentials"
+            });
+        }
+
+        console.log("User found. DB password:", user.password);
+
+        // Simple plain text comparison
+        if (password !== user.password) {
+            console.log("❌ Password mismatch");
+            console.log("Expected:", user.password);
+            console.log("Got:", password);
+            return res.status(401).json({
+                error: "Invalid credentials"
+            });
+        }
+
+        console.log("✅ Login successful for:", username);
+
+        // Return user info
+        res.json({
+            success: true,
+            user: {
+                id: user.id,
+                username: user.username,
+                email: user.email,
+                role: user.role
+            }
+        });
+
+    } catch (error) {
+        console.error("Login error:", error);
+        res.status(500).json({
+            error: "Internal server error",
+            details: process.env.NODE_ENV === "development" ? error.message : undefined
+        });
+    }
+});
+
+// Simple Authentication Middleware (Plain text)
+const authenticateBlogAdmin = async (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization;
+
+        if (!authHeader || !authHeader.startsWith("Basic ")) {
+            return res.status(401).json({ error: "Authentication required" });
+        }
+
+        const base64Credentials = authHeader.split(" ")[1];
+        const credentials = Buffer.from(base64Credentials, "base64").toString("ascii");
+        const [username, password] = credentials.split(":");
+
+        const user = await BlogUser.findOne({
+            where: { username }
+        });
+
+        if (!user) {
+            return res.status(401).json({ error: "Invalid credentials" });
+        }
+
+        // Plain text comparison
+        if (password !== user.password) {
+            return res.status(401).json({ error: "Invalid credentials" });
+        }
+
+        req.user = user;
+        next();
+    } catch (error) {
+        console.error("Auth error:", error);
+        res.status(500).json({ error: "Authentication failed" });
+    }
+};
+
+// Debug endpoint to check database
+app.get("/api/blog/debug-users", async (req, res) => {
+    try {
+        const users = await BlogUser.findAll();
+
+        const userData = users.map(user => ({
+            id: user.id,
+            username: user.username,
+            password: user.password,
+            email: user.email,
+            role: user.role
+        }));
+
+        res.json({
+            success: true,
+            users: userData,
+            message: `Found ${users.length} users`
+        });
+
+    } catch (error) {
+        console.error("Debug error:", error);
+        res.status(500).json({
+            error: "Failed to get users",
+            details: error.message
+        });
+    }
+});
+
+// Create admin if not exists
+app.post("/api/blog/create-admin", async (req, res) => {
+    try {
+        const { username = "admin", password = "admin123", email = "admin@test.com" } = req.body;
+
+        // Check if exists
+        const existing = await BlogUser.findOne({ where: { username } });
+
+        if (existing) {
+            return res.json({
+                success: true,
+                message: "Admin already exists",
+                admin: {
+                    username: existing.username,
+                    password: existing.password
+                }
+            });
+        }
+
+        // Create admin
+        const admin = await BlogUser.create({
+            username,
+            password, // Plain text
+            email,
+            role: "admin"
+        });
+
+        res.json({
+            success: true,
+            message: "Admin created successfully",
+            admin: {
+                id: admin.id,
+                username: admin.username,
+                password: admin.password,
+                email: admin.email
+            }
+        });
+
+    } catch (error) {
+        console.error("Create admin error:", error);
+        res.status(500).json({
+            error: "Failed to create admin",
+            details: error.message
+        });
+    }
+});
+
+// Health check
+app.get("/api/blog/health", (req, res) => {
+    res.json({
+        status: "ok",
+        message: "Blog API is running",
+        timestamp: new Date().toISOString(),
+        authType: "plain_text"
+    });
+});
+
+// GET all blog posts (public)
+app.get("/api/blog/posts", async (req, res) => {
+    try {
+        const { status = "published", page = 1, limit = 10 } = req.query;
+
+        const offset = (page - 1) * limit;
+
+        const posts = await BlogPost.findAndCountAll({
+            where: { status },
+            order: [["post_date", "DESC"], ["created_at", "DESC"]],
+            limit: parseInt(limit),
+            offset: parseInt(offset),
+            include: [
+                {
+                    model: PostStat,
+                    as: "stats",
+                    separate: true,
+                    order: [["sort_order", "ASC"]]
+                },
+                {
+                    model: PostList,
+                    as: "list",
+                    separate: true,
+                    order: [["sort_order", "ASC"]]
+                }
+            ]
+        });
+
+        res.json({
+            success: true,
+            data: posts.rows,
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                total: posts.count,
+                pages: Math.ceil(posts.count / limit)
+            }
+        });
+
+    } catch (error) {
+        console.error("Get posts error:", error);
+        res.status(500).json({
+            error: "Failed to fetch posts",
+            details: process.env.NODE_ENV === "development" ? error.message : undefined
+        });
+    }
+});
+
+// GET single blog post by slug (public)
+app.get("/api/blog/posts/:slug", async (req, res) => {
+    try {
+        const { slug } = req.params;
+
+        const post = await BlogPost.findOne({
+            where: { slug, status: "published" },
+            include: [
+                {
+                    model: PostStat,
+                    as: "stats",
+                    separate: true,
+                    order: [["sort_order", "ASC"]]
+                },
+                {
+                    model: PostList,
+                    as: "list",
+                    separate: true,
+                    order: [["sort_order", "ASC"]]
+                }
+            ]
+        });
+
+        if (!post) {
+            return res.status(404).json({
+                error: "Post not found"
+            });
+        }
+
+        // Increment views
+        await post.increment("views");
+
+        res.json({
+            success: true,
+            data: post
+        });
+
+    } catch (error) {
+        console.error("Get post error:", error);
+        res.status(500).json({
+            error: "Failed to fetch post",
+            details: process.env.NODE_ENV === "development" ? error.message : undefined
+        });
+    }
+});
+
+// CREATE new blog post (admin only)
+app.post("/api/blog/posts", authenticateBlogAdmin, async (req, res) => {
+    try {
+        const { title, content, content2, author, category, date, stats, stats2, list } = req.body;
+
+        console.log("📝 Creating new blog post:", title);
+
+        // Validate required fields
+        if (!title || !content || !date) {
+            return res.status(400).json({
+                error: "Title, content, and date are required"
+            });
+        }
+
+        // Create slug from title
+        const slug = createSlug(title) + "-" + Date.now();
+
+        // Start transaction
+        const transaction = await sequelize.transaction();
+
+        try {
+            // Create blog post
+            const post = await BlogPost.create({
+                title,
+                slug,
+                content,
+                content2: content2 || null,
+                author: author || "Saša Zorović",
+                category: category || "Uncategorized",
+                post_date: date,
+                status: "published"
+            }, { transaction });
+
+            // Create stats1
+            if (stats && Array.isArray(stats)) {
+                const stats1Data = stats.map((stat, index) => ({
+                    post_id: post.id,
+                    table_type: "stats1",
+                    country: stat.country,
+                    label: stat.label,
+                    difference: stat.difference,
+                    travel: stat.travel,
+                    welcome: stat.welcome,
+                    gain: stat.gain,
+                    decline: stat.decline,
+                    position: stat.position,
+                    sort_order: index
+                }));
+
+                if (stats1Data.length > 0) {
+                    await PostStat.bulkCreate(stats1Data, { transaction });
+                }
+            }
+
+            // Create stats2
+            if (stats2 && Array.isArray(stats2)) {
+                const stats2Data = stats2.map((stat, index) => ({
+                    post_id: post.id,
+                    table_type: "stats2",
+                    country: stat.country,
+                    label: stat.label,
+                    difference: stat.difference,
+                    travel: stat.travel,
+                    welcome: stat.welcome,
+                    gain: stat.gain,
+                    decline: stat.decline,
+                    position: stat.position,
+                    sort_order: index
+                }));
+
+                if (stats2Data.length > 0) {
+                    await PostStat.bulkCreate(stats2Data, { transaction });
+                }
+            }
+
+            // Create list items
+            if (list && Array.isArray(list)) {
+                const listData = list.map((item, index) => ({
+                    post_id: post.id,
+                    item_text: item,
+                    sort_order: index
+                }));
+
+                if (listData.length > 0) {
+                    await PostList.bulkCreate(listData, { transaction });
+                }
+            }
+
+            // Commit transaction
+            await transaction.commit();
+
+            console.log("✅ Blog post created successfully:", post.id);
+
+            // Fetch complete post with relationships
+            const completePost = await BlogPost.findByPk(post.id, {
+                include: [
+                    {
+                        model: PostStat,
+                        as: "stats",
+                        separate: true,
+                        order: [["sort_order", "ASC"]]
+                    },
+                    {
+                        model: PostList,
+                        as: "list",
+                        separate: true,
+                        order: [["sort_order", "ASC"]]
+                    }
+                ]
+            });
+
+            res.status(201).json({
+                success: true,
+                message: "Blog post created successfully",
+                data: completePost
+            });
+
+        } catch (error) {
+            // Rollback transaction on error
+            await transaction.rollback();
+            throw error;
+        }
+
+    } catch (error) {
+        console.error("Create post error:", error);
+        res.status(500).json({
+            error: "Failed to create post",
+            details: process.env.NODE_ENV === "development" ? error.message : undefined
+        });
+    }
+});
+
+// UPDATE blog post (admin only)
+app.put("/api/blog/posts/:id", authenticateBlogAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { title, content, content2, author, category, date, stats, stats2, list } = req.body;
+
+        console.log("✏️ Updating blog post:", id);
+
+        const post = await BlogPost.findByPk(id);
+
+        if (!post) {
+            return res.status(404).json({
+                error: "Post not found"
+            });
+        }
+
+        // Start transaction
+        const transaction = await sequelize.transaction();
+
+        try {
+            // Update blog post
+            await post.update({
+                title: title || post.title,
+                content: content || post.content,
+                content2: content2 !== undefined ? content2 : post.content2,
+                author: author || post.author,
+                category: category || post.category,
+                post_date: date || post.post_date
+            }, { transaction });
+
+            // Delete existing stats and lists
+            await PostStat.destroy({
+                where: { post_id: id },
+                transaction
+            });
+
+            await PostList.destroy({
+                where: { post_id: id },
+                transaction
+            });
+
+            // Create stats1
+            if (stats && Array.isArray(stats)) {
+                const stats1Data = stats.map((stat, index) => ({
+                    post_id: id,
+                    table_type: "stats1",
+                    country: stat.country,
+                    label: stat.label,
+                    difference: stat.difference,
+                    travel: stat.travel,
+                    welcome: stat.welcome,
+                    gain: stat.gain,
+                    decline: stat.decline,
+                    position: stat.position,
+                    sort_order: index
+                }));
+
+                if (stats1Data.length > 0) {
+                    await PostStat.bulkCreate(stats1Data, { transaction });
+                }
+            }
+
+            // Create stats2
+            if (stats2 && Array.isArray(stats2)) {
+                const stats2Data = stats2.map((stat, index) => ({
+                    post_id: id,
+                    table_type: "stats2",
+                    country: stat.country,
+                    label: stat.label,
+                    difference: stat.difference,
+                    travel: stat.travel,
+                    welcome: stat.welcome,
+                    gain: stat.gain,
+                    decline: stat.decline,
+                    position: stat.position,
+                    sort_order: index
+                }));
+
+                if (stats2Data.length > 0) {
+                    await PostStat.bulkCreate(stats2Data, { transaction });
+                }
+            }
+
+            // Create list items
+            if (list && Array.isArray(list)) {
+                const listData = list.map((item, index) => ({
+                    post_id: id,
+                    item_text: item,
+                    sort_order: index
+                }));
+
+                if (listData.length > 0) {
+                    await PostList.bulkCreate(listData, { transaction });
+                }
+            }
+
+            // Commit transaction
+            await transaction.commit();
+
+            console.log("✅ Blog post updated successfully:", id);
+
+            // Fetch updated post with relationships
+            const updatedPost = await BlogPost.findByPk(id, {
+                include: [
+                    {
+                        model: PostStat,
+                        as: "stats",
+                        separate: true,
+                        order: [["sort_order", "ASC"]]
+                    },
+                    {
+                        model: PostList,
+                        as: "list",
+                        separate: true,
+                        order: [["sort_order", "ASC"]]
+                    }
+                ]
+            });
+
+            res.json({
+                success: true,
+                message: "Blog post updated successfully",
+                data: updatedPost
+            });
+
+        } catch (error) {
+            // Rollback transaction on error
+            await transaction.rollback();
+            throw error;
+        }
+
+    } catch (error) {
+        console.error("Update post error:", error);
+        res.status(500).json({
+            error: "Failed to update post",
+            details: process.env.NODE_ENV === "development" ? error.message : undefined
+        });
+    }
+});
+
+// DELETE blog post (admin only)
+app.delete("/api/blog/posts/:id", authenticateBlogAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        console.log("🗑️ Deleting blog post:", id);
+
+        const post = await BlogPost.findByPk(id);
+
+        if (!post) {
+            return res.status(404).json({
+                error: "Post not found"
+            });
+        }
+
+        await post.destroy();
+
+        console.log("✅ Blog post deleted successfully:", id);
+
+        res.json({
+            success: true,
+            message: "Blog post deleted successfully"
+        });
+
+    } catch (error) {
+        console.error("Delete post error:", error);
+        res.status(500).json({
+            error: "Failed to delete post",
+            details: process.env.NODE_ENV === "development" ? error.message : undefined
+        });
+    }
+});
+
+// GET all blog posts for admin (with pagination)
+app.get("/api/blog/admin/posts", authenticateBlogAdmin, async (req, res) => {
+    try {
+        const { page = 1, limit = 20, search = "" } = req.query;
+
+        const offset = (page - 1) * limit;
+
+        const whereCondition = {};
+
+        if (search) {
+            whereCondition.title = {
+                [Op.iLike]: `%${search}%`
+            };
+        }
+
+        const posts = await BlogPost.findAndCountAll({
+            where: whereCondition,
+            order: [["created_at", "DESC"]],
+            limit: parseInt(limit),
+            offset: parseInt(offset)
+        });
+
+        res.json({
+            success: true,
+            data: posts.rows,
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                total: posts.count,
+                pages: Math.ceil(posts.count / limit)
+            }
+        });
+
+    } catch (error) {
+        console.error("Admin get posts error:", error);
+        res.status(500).json({
+            error: "Failed to fetch posts",
+            details: process.env.NODE_ENV === "development" ? error.message : undefined
+        });
+    }
+});
+
+// Admin login endpoint
+app.post("/api/blog/admin/login", async (req, res) => {
+    try {
+        const { username, password } = req.body;
+
+        console.log("🔐 Admin login attempt:", username);
+
+        if (!username || !password) {
+            return res.status(400).json({
+                error: "Username and password are required"
+            });
+        }
+
+        // Find user
+        const user = await BlogUser.findOne({
+            where: { username }
+        });
+
+        if (!user) {
+            console.log("❌ User not found:", username);
+            return res.status(401).json({
+                error: "Invalid credentials"
+            });
+        }
+
+        // Verify password
+        const isValidPassword = await bcrypt.compare(password, user.password_hash);
+
+        if (!isValidPassword) {
+            console.log("❌ Invalid password for:", username);
+            return res.status(401).json({
+                error: "Invalid credentials"
+            });
+        }
+
+        console.log("✅ Login successful for:", username);
+
+        // Return user info (without password)
+        res.json({
+            success: true,
+            user: {
+                id: user.id,
+                username: user.username,
+                email: user.email,
+                role: user.role
+            }
+        });
+
+    } catch (error) {
+        console.error("Login error:", error);
+        res.status(500).json({
+            error: "Internal server error",
+            details: process.env.NODE_ENV === "development" ? error.message : undefined
+        });
+    }
+});
+
+// Blog test endpoint
+app.get("/api/blog/test", (req, res) => {
+    res.json({
+        message: "Blog API is working",
+        timestamp: new Date().toISOString()
+    });
+});
+
+// Initialize Admin User (run once)
+app.post("/api/blog/init-admin", async (req, res) => {
+    try {
+        const { username, password, email } = req.body;
+
+        // Hash password
+        const saltRounds = 10;
+        const passwordHash = await bcrypt.hash(password, saltRounds);
+
+        // Create admin user
+        await BlogUser.create({
+            username,
+            password_hash: passwordHash,
+            email,
+            role: "admin"
+        });
+
+        res.json({
+            success: true,
+            message: "Admin user created successfully"
+        });
+
+    } catch (error) {
+        console.error("Init admin error:", error);
+        res.status(500).json({
+            error: "Failed to create admin user",
+            details: process.env.NODE_ENV === "development" ? error.message : undefined
+        });
+    }
+});
 
 // ====================================================
 // 1️⃣ GET ALL COUNTRIES SUMMARY FOR A YEAR
@@ -451,6 +1185,170 @@ app.get("/api/debug/raw-data/:year/:countryCode", async (req, res) => {
         res.status(500).json({ error: "Internal server error", details: err.message });
     }
 });
+
+
+
+
+// ====================================================
+// CONTACT FORM SUBMIT ENDPOINT
+// ====================================================
+app.post('/api/contact/submit', async (req, res) => {
+    try {
+        const { fullName, email, subject, message } = req.body;
+
+        console.log('📧 Contact form submission received');
+
+        // Basic validation
+        if (!fullName?.trim() || fullName.length < 2) {
+            return res.status(400).json({
+                success: false,
+                message: 'Name must be at least 2 characters'
+            });
+        }
+
+        if (!email?.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Valid email is required'
+            });
+        }
+
+        if (!subject?.trim() || subject.length < 5) {
+            return res.status(400).json({
+                success: false,
+                message: 'Subject must be at least 5 characters'
+            });
+        }
+
+        if (!message?.trim() || message.length < 20) {
+            return res.status(400).json({
+                success: false,
+                message: 'Message must be at least 20 characters'
+            });
+        }
+
+        // SIMPLE save without any timestamp fields
+        const contact = await Contact.create({
+            fullName: fullName.trim(),
+            email: email.trim(),
+            subject: subject.trim(),
+            message: message.trim()
+        });
+
+        console.log('✅ Contact form saved to database with ID:', contact.id);
+
+        res.status(201).json({
+            success: true,
+            message: 'Thank you for your message! We will get back to you within 24-48 hours.',
+            data: {
+                id: contact.id
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Error submitting contact form:', error);
+
+        // Simplified error handling
+        if (error.name === 'SequelizeDatabaseError' && error.parent?.code === '42703') {
+            // This means column doesn't exist - we need to fix the table
+            console.error('Database column mismatch! Check table structure.');
+        }
+
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error. Please try again later.'
+        });
+    }
+});
+
+
+
+// GET VFFI for all years
+app.get("/api/vffi", async (req, res) => {
+    try {
+        const yearsData = await Year.findAll({
+            attributes: ["year", "vffi", ["world_population", "worldPopulation"]],
+            order: [["year", "ASC"]]
+        });
+
+        const formatted = yearsData.map(y => {
+            // Convert vffi to a number safely
+            let vffiNum = parseFloat(y.vffi);
+            if (isNaN(vffiNum)) vffiNum = 0;
+
+            return {
+                year: y.year,
+                vffi: vffiNum.toFixed(2),
+                worldPopulation: y.worldPopulation
+            };
+        });
+
+        res.json(formatted);
+    } catch (err) {
+        console.error("Error fetching VFFI data:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+// ====================================================
+// GET all years data for a specific country
+// ====================================================
+app.get("/api/country/:countryCode/freedom-index", async (req, res) => {
+    const countryCode = req.params.countryCode.toUpperCase();
+
+    try {
+        // 1️⃣ Get the country ID first
+        const countryResults = await sequelize.query(
+            `SELECT id, name, code FROM countries WHERE code = :countryCode`,
+            {
+                replacements: { countryCode },
+                type: sequelize.QueryTypes.SELECT
+            }
+        );
+
+        if (countryResults.length === 0) {
+            return res.status(404).json({ error: `Country not found: ${countryCode}` });
+        }
+
+        const country = countryResults[0];
+
+        // 2️⃣ Get all years data for this country
+        const dataResults = await sequelize.query(
+            `
+            SELECT year, population, freedom_index, welcome_index
+            FROM country_year_index_data
+            WHERE country_id = :countryId
+            ORDER BY year ASC
+            `,
+            {
+                replacements: { countryId: country.id },
+                type: sequelize.QueryTypes.SELECT
+            }
+        );
+
+        // 3️⃣ Format response
+        const response = {
+            country: {
+                id: country.id,
+                code: country.code,
+                name: country.name
+            },
+            data: dataResults.map(row => ({
+                year: row.year,
+                population: row.population || 0,
+                freedomIndex: row.freedom_index || 0,
+                welcomeIndex: row.welcome_index || 0
+            }))
+        };
+
+        res.json(response);
+    } catch (err) {
+        console.error("Error fetching country freedom index data:", err);
+        res.status(500).json({ error: "Internal server error", details: err.message });
+    }
+});
+
 
 // ====================================================
 // START SERVER

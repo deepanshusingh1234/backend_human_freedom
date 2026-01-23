@@ -20,6 +20,10 @@ export const Year = sequelize.define("Year", {
         type: DataTypes.BIGINT,
         allowNull: true,
         field: "world_population"
+    },
+    vffi: {
+        type: DataTypes.FLOAT,  // store numeric VFFI
+        allowNull: true
     }
 }, {
     tableName: "years",
