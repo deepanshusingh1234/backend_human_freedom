@@ -6,7 +6,8 @@
   "main": "api.js",
   "scripts": {
     "start": "node api.js",
-    "dev": "nodemon api.js"
+    "dev": "nodemon api.js",
+    "import-sql": "node importSQL.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
